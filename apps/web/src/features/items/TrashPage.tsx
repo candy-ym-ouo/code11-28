@@ -4,7 +4,13 @@ import { api, ApiError } from '../../api/client';
 import { Button, EmptyState, Spinner } from '../../components/ui';
 import { useToast } from '../../components/Toast';
 import { formatDateTime } from '../../lib/format';
+import { STATUS_LABELS } from '../../lib/constants';
 import type { Item } from '../../api/types';
+
+interface RestoreResponse {
+  item: Item;
+  warning?: string;
+}
 
 export function TrashPage() {
   const { fid } = useParams<{ fid: string }>();
@@ -23,9 +29,11 @@ export function TrashPage() {
   };
 
   const restore = useMutation({
-    mutationFn: (itemId: string) => api.post(`/families/${fid}/items/${itemId}/restore`),
-    onSuccess: async () => {
-      push('已恢复', 'success');
+    mutationFn: (itemId: string) =>
+      api.post<RestoreResponse>(`/families/${fid}/items/${itemId}/restore`),
+    onSuccess: async (data) => {
+      // 恢复优先回到删除前状态；若发布条件已不满足，服务端会降级为草稿并给出原因
+      push(data.warning ?? `已恢复为「${STATUS_LABELS[data.item.status]}」`, data.warning ? 'info' : 'success');
       await invalidate();
     },
     onError: (err) => push(err instanceof ApiError ? err.message : '恢复失败', 'error'),
@@ -48,7 +56,7 @@ export function TrashPage() {
       <div className="page-head">
         <div>
           <h1>回收站</h1>
-          <p className="page-head__sub">删除的条目会在这里保留 30 天，到期后自动彻底清除。</p>
+          <p className="page-head__sub">删除的条目会在这里保留 30 天，到期后自动彻底清除。恢复会回到删除前的状态。</p>
         </div>
         <Link className="btn" to={`/f/${fid}/settings`}>
           返回设置
@@ -64,6 +72,7 @@ export function TrashPage() {
               <tr>
                 <th>名称</th>
                 <th>类别</th>
+                <th>删除前状态</th>
                 <th>删除时间</th>
                 <th style={{ width: 200 }}>操作</th>
               </tr>
@@ -73,7 +82,8 @@ export function TrashPage() {
                 <tr key={item.id}>
                   <td>{item.title}</td>
                   <td>{item.category}</td>
-                  <td>{item.acquiredDisplay}</td>
+                  <td>{item.statusBeforeTrash ? STATUS_LABELS[item.statusBeforeTrash] : '草稿'}</td>
+                  <td>{item.deletedAt ? formatDateTime(item.deletedAt) : '—'}</td>
                   <td>
                     <div className="row" style={{ gap: 'var(--space-2)' }}>
                       <Button size="sm" loading={restore.isPending} onClick={() => restore.mutate(item.id)}>
@@ -98,10 +108,6 @@ export function TrashPage() {
           </table>
         </div>
       )}
-      <p className="muted" style={{ marginTop: 'var(--space-4)', fontSize: 13 }}>
-        最后更新时间：{items[0] ? formatDateTime(items[0].updatedAt) : '—'}
-      </p>
     </div>
   );
 }
-

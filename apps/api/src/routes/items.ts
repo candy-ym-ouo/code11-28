@@ -88,8 +88,8 @@ for (const action of ['publish', 'archive', 'restore', 'trash'] as const) {
     asyncHandler(async (req, res) => {
       const user = currentUser(req);
       const ctx = familyCtx(req);
-      const item = await itemService.changeStatus(user.id, ctx, req.params.itemId!, action, clientMeta(req));
-      res.json({ item });
+      const result = await itemService.changeStatus(user.id, ctx, req.params.itemId!, action, clientMeta(req));
+      res.json(result);
     }),
   );
 }

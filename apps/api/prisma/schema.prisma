@@ -235,6 +235,8 @@ model Item {
   createdAt         DateTime   @default(now()) @map("created_at")
   updatedAt         DateTime   @updatedAt @map("updated_at")
   deletedAt         DateTime?  @map("deleted_at")
+  /// 删除前的状态（draft/published/archived）。恢复时回到该状态，而不是一律变成已发布。
+  statusBeforeTrash ItemStatus? @map("status_before_trash")
 
   family  Family       @relation(fields: [familyId], references: [id], onDelete: Cascade)
   creator User         @relation(fields: [createdBy], references: [id])

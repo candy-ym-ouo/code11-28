@@ -38,12 +38,16 @@ export function ItemDetailPage() {
 
   const status = useMutation({
     mutationFn: (action: 'publish' | 'archive' | 'restore' | 'trash') =>
-      api.post(`/families/${fid}/items/${itemId}/${action}`),
-    onSuccess: async (_data, action) => {
-      push(
-        action === 'publish' ? '已发布，家人现在能看到了' : action === 'archive' ? '已归档' : action === 'trash' ? '已移入回收站' : '已恢复',
-        'success',
-      );
+      api.post<{ item: ItemDetail; warning?: string }>(`/families/${fid}/items/${itemId}/${action}`),
+    onSuccess: async (data, action) => {
+      if (action === 'restore') {
+        push(data.warning ?? `已恢复为「${STATUS_LABELS[data.item.status]}」`, data.warning ? 'info' : 'success');
+      } else {
+        push(
+          action === 'publish' ? '已发布，家人现在能看到了' : action === 'archive' ? '已归档' : '已移入回收站',
+          'success',
+        );
+      }
       await invalidate();
     },
     onError: (err) => push(err instanceof ApiError ? err.message : '操作失败', 'error'),

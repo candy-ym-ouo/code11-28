@@ -1,4 +1,4 @@
-import type { FamilyRole, Item, Prisma } from '@prisma/client';
+import type { FamilyRole, Item, Prisma, PrismaClient } from '@prisma/client';
 import { sortAt as computeSortAt, timelineGroupKey, type Category, type Precision, type Visibility } from '@heirloom/shared';
 import { prisma } from '../db';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors';
@@ -8,6 +8,16 @@ import * as audit from './auditService';
 import { itemWithAccess, type FamilyContext } from './permissionService';
 import { toItemDto } from '../serializers';
 import { itemVisibilityWhere } from './visibility';
+import {
+  ALLOWED_TRANSITIONS,
+  isPreTrashStatus,
+  meetsPublishRequirements,
+  resolveRestore,
+  statusFromTrashAudit,
+  statusFromVersionSnapshot,
+  type PreTrashStatus,
+  type StatusAction,
+} from './itemStatus';
 
 export interface ActorMeta {
   ip?: string | null;
@@ -367,14 +377,38 @@ export async function updateItem(
   });
 }
 
-type StatusAction = 'publish' | 'archive' | 'restore' | 'trash';
+export type { StatusAction };
 
-const STATUS_TARGET: Record<StatusAction, Item['status']> = {
-  publish: 'published',
-  archive: 'archived',
-  restore: 'published',
-  trash: 'trashed',
-};
+export interface ChangeStatusResult {
+  item: ReturnType<typeof toItemDto>;
+  /** 恢复时未能回到删除前状态（如发布条件不再满足），给用户的提示。 */
+  warning?: string;
+}
+
+/**
+ * 旧数据兼容：statusBeforeTrash 为空的回收站条目，按
+ * 审计日志 → 最后版本快照 → 草稿 的顺序推断删除前状态，
+ * 默认草稿保证恢复后不会被意外公开。
+ */
+async function inferPreTrashStatus(
+  tx: PrismaClient | Prisma.TransactionClient,
+  itemId: string,
+): Promise<PreTrashStatus> {
+  const trashLog = await tx.auditLog.findFirst({
+    where: { targetType: 'item', targetId: itemId, action: 'item.trash' },
+    orderBy: { createdAt: 'desc' },
+    select: { diff: true },
+  });
+  const fromLog = statusFromTrashAudit(trashLog?.diff);
+  if (fromLog) return fromLog;
+
+  const lastVersion = await tx.itemVersion.findFirst({
+    where: { itemId },
+    orderBy: { version: 'desc' },
+    select: { snapshot: true },
+  });
+  return statusFromVersionSnapshot(lastVersion?.snapshot) ?? 'draft';
+}
 
 export async function changeStatus(
   userId: string,
@@ -382,30 +416,53 @@ export async function changeStatus(
   itemId: string,
   action: StatusAction,
   meta: ActorMeta,
-) {
+): Promise<ChangeStatusResult> {
   const { item, access } = await itemWithAccess(userId, ctx, itemId);
 
-  if (action === 'trash') {
-    if (!access.canDelete) throw forbidden();
-  } else if (action === 'restore') {
+  if (!ALLOWED_TRANSITIONS[item.status].has(action)) {
+    throw conflict('当前状态不允许该操作');
+  }
+
+  if (action === 'trash' || action === 'restore') {
     if (!access.canDelete) throw forbidden();
   } else if (!access.canEdit) {
     throw forbidden();
   }
 
-  if (action === 'publish') {
+  let target: Item['status'];
+  let statusBeforeTrash: Prisma.ItemUpdateInput['statusBeforeTrash'];
+  let warning: string | null = null;
+
+  if (action === 'trash') {
+    // 记住删除前状态，恢复时才能原样回去
+    target = 'trashed';
+    statusBeforeTrash = item.status;
+  } else if (action === 'restore') {
+    const previous = isPreTrashStatus(item.statusBeforeTrash)
+      ? item.statusBeforeTrash
+      : await inferPreTrashStatus(prisma, itemId);
     const mediaCount = await prisma.itemMedia.count({ where: { itemId, deletedAt: null } });
-    const hasClue = Boolean(item.acquiredAt || item.acquiredLabel || item.placeText || item.storyText);
-    if (!hasClue && mediaCount === 0) {
+    const decision = resolveRestore(previous, item, mediaCount);
+    target = decision.status;
+    warning = decision.warning;
+    // 已回到正常状态，删除前状态不再保留，供下次删除重新记录
+    statusBeforeTrash = null;
+  } else {
+    // publish / archive：发布到对外可见状态前都要校验发布条件
+    target = action === 'publish' ? 'published' : 'archived';
+    if (!meetsPublishRequirements(item, await prisma.itemMedia.count({ where: { itemId, deletedAt: null } }))) {
       throw badRequest('发布前请至少补充一条线索：获得时间、地点、故事或一张图片');
     }
   }
 
-  const target = STATUS_TARGET[action];
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.item.update({
       where: { id: itemId },
-      data: { status: target, deletedAt: action === 'trash' ? new Date() : null },
+      data: {
+        status: target,
+        deletedAt: action === 'trash' ? new Date() : null,
+        statusBeforeTrash,
+      },
       include: LIST_INCLUDE,
     });
     await audit.record(
@@ -422,7 +479,7 @@ export async function changeStatus(
     );
     return result;
   });
-  return toItemDto(updated, ctx.familyId);
+  return { item: toItemDto(updated, ctx.familyId), ...(warning ? { warning } : {}) };
 }
 
 /** 彻底删除：先删库，再清理磁盘文件；审计保留（合规与追溯需要）。 */

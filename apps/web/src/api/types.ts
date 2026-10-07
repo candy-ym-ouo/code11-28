@@ -86,7 +86,9 @@ export interface Item {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  deletedAt: string | null;
   coverMediaId: string | null;
+  statusBeforeTrash: ItemStatus | null;
   mediaCount: number;
   noteCount: number;
   media: Media[];
