@@ -4,7 +4,14 @@ import { api, ApiError } from '../../api/client';
 import { Button, EmptyState, Spinner } from '../../components/ui';
 import { useToast } from '../../components/Toast';
 import { formatDateTime } from '../../lib/format';
+import { STATUS_LABELS } from '../../lib/constants';
 import type { Item } from '../../api/types';
+
+/** 恢复后会回到的状态：删除前有记录按记录，没有记录（旧数据）按草稿。 */
+function restoreTargetLabel(item: Item): string {
+  if (item.previousStatus && item.previousStatus !== 'trashed') return STATUS_LABELS[item.previousStatus];
+  return '草稿';
+}
 
 export function TrashPage() {
   const { fid } = useParams<{ fid: string }>();
@@ -23,9 +30,9 @@ export function TrashPage() {
   };
 
   const restore = useMutation({
-    mutationFn: (itemId: string) => api.post(`/families/${fid}/items/${itemId}/restore`),
-    onSuccess: async () => {
-      push('已恢复', 'success');
+    mutationFn: (itemId: string) => api.post<{ item: Item }>(`/families/${fid}/items/${itemId}/restore`),
+    onSuccess: async (data) => {
+      push(`已恢复为「${STATUS_LABELS[data.item.status] ?? data.item.status}」`, 'success');
       await invalidate();
     },
     onError: (err) => push(err instanceof ApiError ? err.message : '恢复失败', 'error'),
@@ -48,7 +55,9 @@ export function TrashPage() {
       <div className="page-head">
         <div>
           <h1>回收站</h1>
-          <p className="page-head__sub">删除的条目会在这里保留 30 天，到期后自动彻底清除。</p>
+          <p className="page-head__sub">
+            删除的条目会在这里保留 30 天，到期后自动彻底清除。恢复后回到删除前的状态。
+          </p>
         </div>
         <Link className="btn" to={`/f/${fid}/settings`}>
           返回设置
@@ -65,6 +74,7 @@ export function TrashPage() {
                 <th>名称</th>
                 <th>类别</th>
                 <th>删除时间</th>
+                <th>恢复为</th>
                 <th style={{ width: 200 }}>操作</th>
               </tr>
             </thead>
@@ -73,7 +83,8 @@ export function TrashPage() {
                 <tr key={item.id}>
                   <td>{item.title}</td>
                   <td>{item.category}</td>
-                  <td>{item.acquiredDisplay}</td>
+                  <td>{item.deletedAt ? formatDateTime(item.deletedAt) : '—'}</td>
+                  <td>{restoreTargetLabel(item)}</td>
                   <td>
                     <div className="row" style={{ gap: 'var(--space-2)' }}>
                       <Button size="sm" loading={restore.isPending} onClick={() => restore.mutate(item.id)}>

@@ -66,6 +66,9 @@ export interface Item {
   title: string;
   category: Category;
   status: ItemStatus;
+  /** 回收站条目删除前的状态（恢复目标）；非回收站条目为 null */
+  previousStatus: ItemStatus | null;
+  deletedAt: string | null;
   visibility: Visibility;
   acquiredAt: string | null;
   acquiredPrecision: Precision;

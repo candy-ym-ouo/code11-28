@@ -369,12 +369,36 @@ export async function updateItem(
 
 type StatusAction = 'publish' | 'archive' | 'restore' | 'trash';
 
-const STATUS_TARGET: Record<StatusAction, Item['status']> = {
+const STATUS_TARGET: Record<Exclude<StatusAction, 'restore'>, Item['status']> = {
   publish: 'published',
   archive: 'archived',
-  restore: 'published',
   trash: 'trashed',
 };
+
+/**
+ * 计算从回收站恢复后的状态：回到删除前记录的状态。
+ * 修复前进入回收站的旧数据没有记录（previousStatus 为 NULL），安全回落为草稿，绝不直接公开；
+ * 恢复到「已发布」时重新校验发布条件，不再满足则降级为草稿恢复
+ * （回收站中的条目不可编辑，直接拒绝会造成「不能恢复也不能补线索」的死锁）。
+ */
+export function resolveRestoreTarget(
+  previousStatus: Item['status'] | null,
+  canPublish: boolean,
+): 'draft' | 'published' | 'archived' {
+  const target = previousStatus === 'published' || previousStatus === 'archived' ? previousStatus : 'draft';
+  if (target === 'published' && !canPublish) return 'draft';
+  return target;
+}
+
+/** 发布条件：至少有一条来历线索（时间/地点/故事）或一份媒体。返回不满足时的提示，满足为 null。 */
+async function publishBlockReason(item: Item): Promise<string | null> {
+  const mediaCount = await prisma.itemMedia.count({ where: { itemId: item.id, deletedAt: null } });
+  const hasClue = Boolean(item.acquiredAt || item.acquiredLabel || item.placeText || item.storyText);
+  if (!hasClue && mediaCount === 0) {
+    return '发布前请至少补充一条线索：获得时间、地点、故事或一张图片';
+  }
+  return null;
+}
 
 export async function changeStatus(
   userId: string,
@@ -393,19 +417,35 @@ export async function changeStatus(
     throw forbidden();
   }
 
-  if (action === 'publish') {
-    const mediaCount = await prisma.itemMedia.count({ where: { itemId, deletedAt: null } });
-    const hasClue = Boolean(item.acquiredAt || item.acquiredLabel || item.placeText || item.storyText);
-    if (!hasClue && mediaCount === 0) {
-      throw badRequest('发布前请至少补充一条线索：获得时间、地点、故事或一张图片');
+  let target: Item['status'];
+  let restoreDowngraded = false;
+  if (action === 'restore') {
+    // 恢复只对回收站条目开放：否则 restore 会成为绕过发布校验直接公开的口子
+    if (item.status !== 'trashed') throw conflict('只有回收站中的条目才能恢复');
+    target = resolveRestoreTarget(item.previousStatus, (await publishBlockReason(item)) === null);
+    restoreDowngraded = item.previousStatus === 'published' && target === 'draft';
+  } else {
+    target = STATUS_TARGET[action];
+    if (action === 'publish') {
+      const reason = await publishBlockReason(item);
+      if (reason) throw badRequest(reason);
     }
   }
 
-  const target = STATUS_TARGET[action];
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.item.update({
       where: { id: itemId },
-      data: { status: target, deletedAt: action === 'trash' ? new Date() : null },
+      data:
+        action === 'trash'
+          ? {
+              status: 'trashed',
+              deletedAt: new Date(),
+              // 记录删除前状态供恢复时还原；重复移入回收站时保留最早的记录
+              previousStatus: item.status === 'trashed' ? item.previousStatus : item.status,
+            }
+          : action === 'restore'
+            ? { status: target, deletedAt: null, previousStatus: null }
+            : { status: target, deletedAt: null },
       include: LIST_INCLUDE,
     });
     await audit.record(
@@ -415,7 +455,10 @@ export async function changeStatus(
         action: `item.${action}` as string,
         targetType: 'item',
         targetId: itemId,
-        diff: audit.diffOf({ status: item.status }, { status: target }),
+        diff: audit.diffOf(
+          { status: item.status },
+          { status: target, ...(restoreDowngraded ? { note: '发布条件已不满足，按草稿恢复' } : {}) },
+        ),
         ...meta,
       },
       tx,

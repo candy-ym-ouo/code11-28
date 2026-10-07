@@ -243,8 +243,10 @@ PERSON_HITS=$(json 'd.items.length' < "$WORK/body")
 if [ "$PERSON_HITS" = "1" ]; then ok "按来源人物反查命中 1 条"; else bad "来源人物反查异常：$PERSON_HITS"; fi
 
 code=$(req GET "$V1/families/$FID/timeline" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "时间轴分组"
-GROUPS=$(json 'd.groups.length' < "$WORK/body")
-if [ "$GROUPS" -ge 1 ]; then ok "时间轴返回 $GROUPS 个时段分组"; else bad "时间轴无分组"; fi
+# 注意：变量名不能叫 GROUPS——它是 bash 内建数组（用户组），赋值会被静默忽略并返回非零，
+# 在 set -e 下会让脚本在这里直接退出（Linux 上必现）。
+TL_GROUPS=$(json 'd.groups.length' < "$WORK/body")
+if [ "$TL_GROUPS" -ge 1 ]; then ok "时间轴返回 $TL_GROUPS 个时段分组"; else bad "时间轴无分组"; fi
 
 code=$(req GET "$V1/families/$FID/stats" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "家庭统计"
 
@@ -302,7 +304,36 @@ code=$(req POST "$V1/families/$FID/items/$IID/trash" "$JAR_A" "" "$TOKEN_A"); ex
 code=$(req GET "$V1/families/$FID/items/trash" "$JAR_A" "" "$TOKEN_A")
 TRASH_N=$(json 'd.items.length' < "$WORK/body")
 if [ "$TRASH_N" -ge 1 ]; then ok "回收站中可查（$TRASH_N 条）"; else bad "回收站查询异常"; fi
+PREV=$(json 'd.items.find(i=>i.id==="'"$IID"'")?.previousStatus' < "$WORK/body")
+if [ "$PREV" = "published" ]; then ok "回收站条目记录了删除前状态（published）"; else bad "删除前状态记录异常：$PREV"; fi
 code=$(req POST "$V1/families/$FID/items/$IID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "从回收站恢复"
+ST=$(json 'd.item.status' < "$WORK/body")
+if [ "$ST" = "published" ]; then ok "已发布条目恢复后仍是已发布"; else bad "已发布条目恢复后状态异常：$ST（应为 published）"; fi
+
+# 恢复必须回到删除前状态：草稿/归档不能被直接公开
+code=$(req POST "$V1/families/$FID/items" "$JAR_A" '{"title":"恢复测试-草稿","category":"other","placeText":"老宅"}' "$TOKEN_A")
+expect "$code" 201 "创建恢复测试条目（草稿）"
+DRAFT_ID=$(json 'd.item.id' < "$WORK/body")
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/trash" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "草稿移入回收站"
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "草稿从回收站恢复"
+ST=$(json 'd.item.status' < "$WORK/body")
+if [ "$ST" = "draft" ]; then ok "草稿恢复后仍是草稿（未被公开）"; else bad "草稿恢复后状态异常：$ST（应为 draft）"; fi
+
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/publish" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "恢复后的草稿可正常发布"
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/archive" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "条目归档"
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/trash" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "归档条目移入回收站"
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 200 "归档条目从回收站恢复"
+ST=$(json 'd.item.status' < "$WORK/body")
+if [ "$ST" = "archived" ]; then ok "归档条目恢复后仍是已归档"; else bad "归档条目恢复后状态异常：$ST（应为 archived）"; fi
+
+# 非回收站条目不允许走恢复接口（防止绕过发布校验直接公开）
+code=$(req POST "$V1/families/$FID/items/$DRAFT_ID/restore" "$JAR_A" "" "$TOKEN_A"); expect "$code" 409 "非回收站条目不能调用恢复"
+
+# 发布条件校验仍然生效：没有任何线索的条目不能发布
+code=$(req POST "$V1/families/$FID/items" "$JAR_A" '{"title":"没有任何线索的条目","category":"other"}' "$TOKEN_A")
+expect "$code" 201 "创建无线索条目"
+EMPTY_ID=$(json 'd.item.id' < "$WORK/body")
+code=$(req POST "$V1/families/$FID/items/$EMPTY_ID/publish" "$JAR_A" "" "$TOKEN_A"); expect "$code" 400 "无线索条目发布被拒绝"
 
 # ---------- 汇总 ----------
 printf '\n\033[1m结果：%d 项通过，%d 项失败\033[0m\n' "$PASS" "$FAIL"

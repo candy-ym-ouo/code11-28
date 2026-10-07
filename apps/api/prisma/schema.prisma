@@ -213,6 +213,8 @@ model Item {
   title             String
   category          Category
   status            ItemStatus @default(draft)
+  // 移入回收站前的状态，恢复时回到该状态；修复前进入回收站的旧数据为 NULL，恢复时按草稿处理
+  previousStatus    ItemStatus? @map("previous_status")
   visibility        Visibility @default(family)
   acquiredAt        DateTime?  @map("acquired_at")
   acquiredPrecision Precision  @default(unknown) @map("acquired_precision")

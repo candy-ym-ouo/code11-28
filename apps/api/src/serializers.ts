@@ -59,6 +59,9 @@ export function toItemDto(
     title: item.title,
     category: item.category,
     status: item.status,
+    // 回收站条目专用：删除前的状态（恢复目标）；非回收站条目为 null
+    previousStatus: item.previousStatus ?? null,
+    deletedAt: item.deletedAt?.toISOString() ?? null,
     visibility: item.visibility,
     acquiredAt: item.acquiredAt?.toISOString() ?? null,
     acquiredPrecision: item.acquiredPrecision,
